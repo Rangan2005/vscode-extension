@@ -2,6 +2,8 @@
 // Licensed under the MIT License.
 
 import * as vscode from 'vscode';
+import * as path from 'path';
+import * as cp from 'child_process';
 import { LanguageClient } from 'vscode-languageclient/node';
 import { registerLogger, traceError, traceLog, traceVerbose } from './common/log/logging';
 import {
@@ -34,14 +36,130 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         await lsClient?.setTrace(level);
     };
 
+    // context.subscriptions.push(
+    //     outputChannel.onDidChangeLogLevel(async (e) => {
+    //         await changeLogLevel(e, vscode.env.logLevel);
+    //     }),
+    //     vscode.env.onDidChangeLogLevel(async (e) => {
+    //         await changeLogLevel(outputChannel.logLevel, e);
+    //     }),
+    // );
+
     context.subscriptions.push(
-        outputChannel.onDidChangeLogLevel(async (e) => {
-            await changeLogLevel(e, vscode.env.logLevel);
-        }),
-        vscode.env.onDidChangeLogLevel(async (e) => {
-            await changeLogLevel(outputChannel.logLevel, e);
+        vscode.commands.registerCommand('analyse.analyzeFunctions', async () => {
+            // 1. Ask the user to select a folder
+            const folderUris = await vscode.window.showOpenDialog({
+                canSelectFolders: true,
+                canSelectMany: false,
+                openLabel: 'Select folder to analyze',
+            });
+            if (!folderUris || folderUris.length === 0) {
+                return;
+            }
+            const folderPath = folderUris[0].fsPath;
+
+            // 2. Determine the Python script path
+            const scriptPath = path.join(context.extensionPath, 'pythonFiles', 'analyze_functions.py');
+
+            // 3. Spawn Python subprocess
+            //    Note: You may want to allow configuration of the python executable via settings.
+            const pythonExec = 'python'; // or fetch from setting, e.g., vscode.workspace.getConfiguration('function-analyzer').get('pythonPath')
+            const proc = cp.spawn(pythonExec, [scriptPath, folderPath]);
+
+            let stdout = '';
+            let stderr = '';
+            proc.stdout.on('data', (data) => {
+                stdout += data.toString();
+            });
+            proc.stderr.on('data', (data) => {
+                stderr += data.toString();
+            });
+            proc.on('error', (err) => {
+                vscode.window.showErrorMessage(`Failed to launch Python: ${err.message}`);
+            });
+            proc.on('close', () => {
+                if (stderr) {
+                    console.error(stderr);
+                }
+                let parsed: Record<string, number> = {};
+                try {
+                    parsed = JSON.parse(stdout);
+                } catch (e) {
+                    vscode.window.showErrorMessage('Could not parse analysis result from Python script.');
+                    return;
+                }
+                if (parsed.error) {
+                    vscode.window.showErrorMessage(`Analysis error: ${parsed.error}`);
+                    return;
+                }
+                showFunctionCountWebview(parsed, folderPath);
+            });
         }),
     );
+
+    function showFunctionCountWebview(data: Record<string, number>, baseFolder: string) {
+        const panel = vscode.window.createWebviewPanel(
+            'functionCountAnalysis', // internal viewType
+            'Function Count Analysis', // title
+            vscode.ViewColumn.One,
+            {
+                enableScripts: false,
+            },
+        );
+        // Build a nested tree-style HTML. For simplicity: sort entries alphabetically.
+        const entries = Object.entries(data).sort((a, b) => a[0].localeCompare(b[0]));
+        // Group by folder for display:
+        interface TreeNode {
+            [key: string]: TreeNode | number;
+        }
+        const tree: TreeNode = {};
+        for (const [relPath, count] of entries) {
+            const parts = relPath.split(path.sep);
+            let curr: TreeNode = tree;
+            for (let i = 0; i < parts.length; i++) {
+                const part = parts[i];
+                if (i === parts.length - 1) {
+                    curr[part] = count;
+                } else {
+                    if (!(part in curr)) {
+                        curr[part] = {};
+                    }
+                    curr = curr[part] as TreeNode;
+                }
+            }
+        }
+        // Recursive HTML builder:
+        function buildList(node: TreeNode): string {
+            let html = '<ul>';
+            for (const key of Object.keys(node)) {
+                const val = node[key];
+                if (typeof val === 'number') {
+                    html += `<li>${key}: ${val} function${val !== 1 ? 's' : ''}</li>`;
+                } else {
+                    html += `<li>${key}/${buildList(val)}</li>`;
+                }
+            }
+            html += '</ul>';
+            return html;
+        }
+        const bodyHtml = buildList(tree);
+        panel.webview.html = `<!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <style>
+        body { font-family: sans-serif; padding: 10px; }
+        ul { list-style-type: none; padding-left: 1em; }
+        li::before { content: "• "; color: #888; }
+        </style>
+    </head>
+    <body>
+        <h2>Function Count Analysis for:</h2>
+        <p><strong>${baseFolder}</strong></p>
+        ${bodyHtml}
+    </body>
+    </html>`;
+    }
 
     // Log Server information
     traceLog(`Name: ${serverInfo.name}`);
