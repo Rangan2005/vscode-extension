@@ -3,6 +3,12 @@
 """Implementation of tool support over LSP."""
 from __future__ import annotations
 
+import sys, pathlib
+# Compute extension root: lsp_server.py is in bundled/tool, so go up two levels to extension root
+root = pathlib.Path(__file__).parent.parent.parent
+# Insert extension root onto sys.path so `import src...` works
+sys.path.insert(0, str(root))
+
 import copy
 import json
 import os
@@ -12,6 +18,13 @@ import sys
 import sysconfig
 import traceback
 from typing import Any, Optional, Sequence
+
+# Graph integration imports
+from src.graph.graph_database_manager import GraphDatabaseManager
+from src.graph.graph_query_service import GraphQueryService
+# Parser import - adjust based on actual parser module
+# from src.parser.code_parser import CodeParserService
+from src.interfaces import ParsedCodeModel
 
 
 # **********************************************************
@@ -91,25 +104,83 @@ TOOL_ARGS = []  # default arguments always passed to your tool.
 @LSP_SERVER.feature(lsp.TEXT_DOCUMENT_DID_OPEN)
 def did_open(params: lsp.DidOpenTextDocumentParams) -> None:
     """LSP handler for textDocument/didOpen request."""
-    document = LSP_SERVER.workspace.get_document(params.text_document.uri)
+    document = LSP_SERVER.workspace.get_text_document(params.text_document.uri)
+    log_to_output(f"[Analyse] did_open: {document.uri}")
     diagnostics: list[lsp.Diagnostic] = _linting_helper(document)
     LSP_SERVER.publish_diagnostics(document.uri, diagnostics)
+    _handle_graph_ingest(document)
 
 
 @LSP_SERVER.feature(lsp.TEXT_DOCUMENT_DID_SAVE)
 def did_save(params: lsp.DidSaveTextDocumentParams) -> None:
     """LSP handler for textDocument/didSave request."""
-    document = LSP_SERVER.workspace.get_document(params.text_document.uri)
+    document = LSP_SERVER.workspace.get_text_document(params.text_document.uri)
+    log_to_output(f"[Analyse] did_save: {document.uri}")
     diagnostics: list[lsp.Diagnostic] = _linting_helper(document)
     LSP_SERVER.publish_diagnostics(document.uri, diagnostics)
+    _handle_graph_ingest(document)
 
 
 @LSP_SERVER.feature(lsp.TEXT_DOCUMENT_DID_CLOSE)
 def did_close(params: lsp.DidCloseTextDocumentParams) -> None:
     """LSP handler for textDocument/didClose request."""
-    document = LSP_SERVER.workspace.get_document(params.text_document.uri)
+    document = LSP_SERVER.workspace.get_text_document(params.text_document.uri)
     # Publishing empty diagnostics to clear the entries for this file.
     LSP_SERVER.publish_diagnostics(document.uri, [])
+    # Optionally remove nodes from graph? Could implement cleanup if desired.
+    # _handle_graph_remove(document)
+
+# def _handle_graph_ingest(document: workspace.Document) -> None:
+#     """Parse the document and ingest into GraphQueryService."""
+#     try:
+#         # Only ingest certain file types, e.g., Python files
+#         if not document.path.endswith('.py'):
+#             return
+#         # Parse document to ParsedCodeModel; adjust to actual parser implementation
+#         # Example: parsed = CodeParserService.parse(document.source, document.path)
+#         parsed: ParsedCodeModel = _parse_document_to_model(document)
+#         if parsed:
+#             svc = getattr(LSP_SERVER, 'graph_query_service', None)
+#             if svc:
+#                 svc.ingestParsedCode(parsed)
+#                 log_to_output(f"Ingested graph for {document.path}")
+#         else:
+#             log_to_output(f"[Analyse] parsing returned None for: {path}")
+#     except Exception as e:
+#         log_error(f"Graph ingest failed for {document.path}: {e}")
+
+def _handle_graph_ingest(document: workspace.Document) -> None:
+    """Parse the document and ingest into GraphQueryService."""
+    try:
+        file_path = document.path or ""
+        # Only ingest Python files
+        if not file_path.endswith('.py'):
+            log_to_output(f"[Analyse] _handle_graph_ingest skipped (not .py): {file_path}")
+            return
+        # Parse document to ParsedCodeModel
+        parsed: ParsedCodeModel = _parse_document_to_model(document)
+        if parsed:
+            svc = getattr(LSP_SERVER, 'graph_query_service', None)
+            if svc:
+                svc.ingestParsedCode(parsed)
+                log_to_output(f"[Analyse] Ingested graph for {file_path}")
+            else:
+                log_to_output(f"[Analyse] No graph_query_service available to ingest {file_path}")
+        else:
+            log_to_output(f"[Analyse] parsing returned None for: {file_path}")
+    except Exception as e:
+        log_error(f"[Analyse] Graph ingest failed for {file_path}: {e}")
+
+def _parse_document_to_model(document: workspace.Document) -> Optional[ParsedCodeModel]:
+    """Stub for parsing document.source into ParsedCodeModel."""
+    try:
+        # TODO: Replace with actual parsing logic
+        # For example:
+        # return CodeParserService.parse_to_model(document.source, document.path)
+        return None
+    except Exception as e:
+        log_error(f"Parsing document failed: {e}")
+        return None
 
 
 def _linting_helper(document: workspace.Document) -> list[lsp.Diagnostic]:
@@ -117,8 +188,9 @@ def _linting_helper(document: workspace.Document) -> list[lsp.Diagnostic]:
     # If you want to support linting on change then your tool will need to
     # support linting over stdin to be effective. Read, and update
     # _run_tool_on_document and _run_tool functions as needed for your project.
-    result = _run_tool_on_document(document)
-    return _parse_output_using_regex(result.stdout) if result.stdout else []
+    # result = _run_tool_on_document(document)
+    # return _parse_output_using_regex(result.stdout) if result.stdout else []
+    return [] 
 
 
 # TODO: If your linter outputs in a known format like JSON, then parse
@@ -200,10 +272,10 @@ def formatting(params: lsp.DocumentFormattingParams) -> list[lsp.TextEdit] | Non
     # formatting support on save. You have to return an array of lsp.TextEdit
     # objects, to provide your formatted results.
 
-    document = LSP_SERVER.workspace.get_document(params.text_document.uri)
-    edits = _formatting_helper(document)
-    if edits:
-        return edits
+    # document = LSP_SERVER.workspace.get_document(params.text_document.uri)
+    # edits = _formatting_helper(document)
+    # if edits:
+    #     return edits
 
     # NOTE: If you provide [] array, VS Code will clear the file of all contents.
     # To indicate no changes to file return None.
@@ -276,16 +348,38 @@ def initialize(params: lsp.InitializeParams) -> None:
         f"Global settings:\r\n{json.dumps(GLOBAL_SETTINGS, indent=4, ensure_ascii=False)}\r\n"
     )
 
+    # Setup GraphDatabaseManager and GraphQueryService
+    try:
+        endpoint = os.getenv("GREMLIN_ENDPOINT", "ws://localhost:8182/gremlin")
+        LSP_SERVER.graph_db_manager = GraphDatabaseManager(endpoint)
+        LSP_SERVER.graph_query_service = GraphQueryService(LSP_SERVER.graph_db_manager)
+        log_to_output(f"Initialized GraphQueryService with endpoint {endpoint}")
+    except Exception as e:
+        log_error(f"Failed to initialize Graph services: {e}")
+
 
 @LSP_SERVER.feature(lsp.EXIT)
 def on_exit(_params: Optional[Any] = None) -> None:
     """Handle clean up on exit."""
+    # Close Graph database connection
+    try:
+        if hasattr(LSP_SERVER, 'graph_db_manager'):
+            LSP_SERVER.graph_db_manager.close()
+    except Exception:
+        pass
     jsonrpc.shutdown_json_rpc()
 
 
 @LSP_SERVER.feature(lsp.SHUTDOWN)
 def on_shutdown(_params: Optional[Any] = None) -> None:
     """Handle clean up on shutdown."""
+    # Close Graph database connection
+    try:
+        if hasattr(LSP_SERVER, 'graph_db_manager'):
+            LSP_SERVER.graph_db_manager.close()
+            log_to_output("Closed GraphDatabaseManager connection.")
+    except Exception as e:
+        log_error(f"Error closing GraphDatabaseManager: {e}")
     jsonrpc.shutdown_json_rpc()
 
 
